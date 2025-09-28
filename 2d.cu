@@ -148,8 +148,199 @@ static float uniform(float lo, float hi) {
     return d(g_rng);
 }
 
+static void randUnitVec(float& x, float& y) {
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    x = nd(g_rng); y = nd(g_rng);
+    float m = std::sqrt(x * x + y * y);
+    if (m < 1e-6f) { x = 1; y = 0; return; }
+    x /= m; y /= m;
+}
+
+static void randPointInCirle(float radius, float& x, float& y) {
+    float dx, dy;
+    randUnitVec(dx, dy);
+    float u = uniform(0.0f, 1.0f);
+    float rr = radius * std::sqrt(u);
+    x = dx * rr; y = dy * rr;
+}
+
+static bool insideWorld(float x, float y) {
+    return (x * x + y * y) <= (WORLD_RADIUS * WORLD_RADIUS);
+}
+
+static void pickColours() {
+    static const float ranges[8][2] = {
+        {180, 215}, {200, 235}, {240, 275}, {280, 315},
+        {330, 360}, {20, 55},   {70, 110},  {120, 160}
+    };
+    int idx = std::uniform_int_distribution<int>(0, 7)(g_rng);
+    HUE_MIN = ranges[idx][0];
+    HUE_MAX = ranges[idx][1];
+    SAT_BASE = uniform(78.0f, 100.0f);
+    BRI_BASE = uniform(85.0f, 100.0f);
+}
+
+static Segment makeSegment(float ax_, float ay_, float bx_, float by_, int depth) {
+    Segment s;
+    s.ax = ax_; s.ay = ay_;
+    s.bx = bx_; s.by = by_;
+    s.depth = depth;
+    s.hue = uniform(HUE_MIN, HUE_MAX);
+    s.sat = clampf(SAT_BASE + uniform(-10.0f, 10.0f), 0.0f, 100.0f);
+    s.bri = clampf(BRI_BASE + uniform(-8.0f, 8.0f), 0.0f, 100.0f);
+    s.glow = uniform(0.9f, 1.25f);
+    return s;
+}
+
+static void initSystem() {
+    g_ax.clear(); g_ay.clear();
+    g_branches.clear();
+    g_hasKid.clear();
+    g_segments.clear();
+    g_done = false;
+
+    pickColours();
+
+    g_ax.resize(NUM_ATTRACTORS);
+    g_ay.resize(NUM_ATTRACTORS);
+    for (int i = 0; i < NUM_ATTRACTORS; ++i) {
+        randPointInCirle(WORLD_RADIUS, g_ax[i], g_ay[i]);
+    }
+
+    g_branches.push_back({ 0.0f, 0.0f, 0 });
+    g_hasKid.push_back(false);
+
+    Segment seed;
+    seed.ax = seed.ay = 0.0f;
+    seed.bx = seed.by = 0.0f;
+    seed.depth = 0;
+    seed.hue = (HUE_MIN + HUE_MAX) * 0.5f;
+    seed.sat = SAT_BASE;
+    seed.bri = BRI_BASE;
+    seed.glow = 1.0f;
+    g_segments.push_back(seed);
+}
+
+static void allocGpu() {
+    CUDA_CHECK(cudaMalloc(&d_ax, sizeof(float) * NUM_ATTRACTORS));
+    CUDA_CHECK(cudaMalloc(&d_ay, sizeof(float) * NUM_ATTRACTORS));
+    CUDA_CHECK(cudaMalloc(&d_alive, sizeof(int) * NUM_ATTRACTORS));
+    CUDA_CHECK(cudaMalloc(&d_bx, sizeof(float) * MAX_BRANCHES));
+    CUDA_CHECK(cudaMalloc(&d_by, sizeof(float) * MAX_BRANCHES));
+    CUDA_CHECK(cudaMalloc(&d_bdx, sizeof(float) * MAX_BRANCHES));
+    CUDA_CHECK(cudaMalloc(&d_bdy, sizeof(float) * MAX_BRANCHES));
+    CUDA_CHECK(cudaMalloc(&d_bcount, sizeof(int) * MAX_BRANCHES));
+}
+
+static void freeGpu() {
+    cudaFree(d_ax); cudaFree(d_ay); cudaFree(d_alive);
+    cudaFree(d_bx); cudaFree(d_by);
+    cudaFree(d_bdx); cudaFree(d_bdy); cudaFree(d_bcount);
+}
+
+static void growOneStep() {
+    if (g_done) return;
+    if (g_ax.empty() || (int)g_branches.size() >= MAX_BRANCHES) {
+        g_done = true;
+        return;
+    }
+
+    int nAttr = (int)g_ax.size();
+    int nBranch = (int)g_branches.size();
+
+    CUDA_CHECK(cudaMemcpy(d_ax, g_ax.data(), sizeof(float) * nAttr, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_ay, g_ay.data(), sizeof(float) * nAttr, cudaMemcpyHostToDevice));
+
+    {
+        std::vector<float> bx(nBranch), by(nBranch);
+        for (int i = 0; i < nBranch; ++i) {
+            bx[i] = g_branches[i].x; by[i] = g_branches[i].y;
+        }
+        CUDA_CHECK(cudaMemcpy(d_bx, bx.data(), sizeof(float) * nBranch, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_by, by.data(), sizeof(float) * nBranch, cudaMemcpyHostToDevice));
+    }
+
+    CUDA_CHECK(cudaMemset(d_bdx, 0, sizeof(float) * nBranch));
+    CUDA_CHECK(cudaMemset(d_bdy, 0, sizeof(float) * nBranch));
+    CUDA_CHECK(cudaMemset(d_bcount, 0, sizeof(int) * nBranch));
+
+    const int threads = 256;
+    const int blocks = (nAttr + threads - 1) / threads;
+
+    pullKernel << <blocks, threads >> > (
+        d_ax, d_ay, nAttr, d_alive,
+        d_bx, d_by, nBranch,
+        d_bdx, d_bdy, d_bcount,
+        KILL_DIST * KILL_DIST, INFLUENCE_DIST * INFLUENCE_DIST);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    std::vector<int>   alive(nAttr);
+    std::vector<float> bdx(nBranch), bdy(nBranch);
+    std::vector<int>   bcount(nBranch);
+
+    CUDA_CHECK(cudaMemcpy(alive.data(), d_alive, sizeof(int) * nAttr, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(bdx.data(), d_bdx, sizeof(float) * nBranch, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(bdy.data(), d_bdy, sizeof(float) * nBranch, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(bcount.data(), d_bcount, sizeof(int) * nBranch, cudaMemcpyDeviceToHost));
+
+    {
+        std::vector<float> nax, nay;
+        nax.reserve(nAttr); nay.reserve(nAttr);
+        for (int i = 0; i < nAttr; ++i) {
+            if (alive[i]) {
+                nax.push_back(g_ax[i]);
+                nay.push_back(g_ay[i]);
+            }
+        }
+        g_ax = std::move(nax);
+        g_ay = std::move(nay);
+    }
+
+    int branchTotal = (int)g_branches.size();
+    std::vector<BranchPoint> freshBranches;
+    std::vector<Segment> freshSegments;
+
+    for (int b = 0; b < nBranch; ++b) {
+        if (bcount[b] <= 0) continue;
+        if (branchTotal + (int)freshBranches.size() >= MAX_BRANCHES) break;
+
+        float inv = 1.0f / (float)bcount[b];
+        float dx = bdx[b] * inv, dy = bdy[b] * inv;
+        float m = std::sqrt(dx * dx + dy * dy);
+        if (m == 0.0f) continue;
+
+        dx = (dx / m) * STEP;
+        dy = (dy / m) * STEP;
+
+        const BranchPoint& parent = g_branches[b];
+        float nx = parent.x + dx, ny = parent.y + dy;
+        if (!insideWorld(nx, ny)) continue;
+
+        g_hasKid[b] = true;
+
+        int newDepth = parent.depth + 1;
+        freshBranches.push_back({ nx, ny, newDepth });
+        freshSegments.push_back(makeSegment(parent.x, parent.y, nx, ny, newDepth));
+    }
+
+    if (!freshBranches.empty()) {
+        g_branches.insert(g_branches.end(), freshBranches.begin(), freshBranches.end());
+        g_segments.insert(g_segments.end(), freshSegments.begin(), freshSegments.end());
+        g_hasKid.resize(g_branches.size(), false);
+    }
+
+    if ((int)g_segments.size() > MAX_SEGMENTS) {
+        g_segments.erase(g_segments.begin(), g_segments.begin() + (g_segments.size() - MAX_SEGMENTS));
+    }
+
+    if (g_ax.empty() || (int)g_branches.size() >= MAX_BRANCHES) {
+        g_done = true;
+    }
+}
+
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
-    std::printf("kernel + globals added\n");
+    std::printf("growth loop working\n");
     return 0;
 }
