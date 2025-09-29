@@ -552,7 +552,7 @@ int main(int argc, char** argv) {
         SDL_GetWindowSize(window, &winW, &winH);
         glViewport(0, 0, winW, winH);
 
-        glClearColor(0.8f, 0.1f, 0.1f, 1.0f);
+        glClearColor(0.03f, 0.03f, 0.04f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
         float aspect = winH > 0 ? (float)winW / (float)winH : 1.0f;
