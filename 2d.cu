@@ -339,8 +339,247 @@ static void growOneStep() {
     }
 }
 
+static void drawWorldCircle(float radius, int segmentsCount,
+    float hue, float sat, float bri, float alpha) {
+    float r, g, b;
+    hsb2rgb(hue, sat, bri, r, g, b);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glColor4f(r, g, b, alpha);
+
+    glBegin(GL_LINE_LOOP);
+    for (int j = 0; j < segmentsCount; ++j) {
+        float theta = 2.0f * PI_F * (float)j / segmentsCount;
+        float px = radius * std::cos(theta);
+        float py = radius * std::sin(theta);
+        glVertex2f(px, py);
+    }
+    glEnd();
+
+    glDisable(GL_BLEND);
+}
+
+static void drawSegments() {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+
+    glLineWidth(3.5f);
+    glBegin(GL_LINES);
+    for (const Segment& s : g_segments) {
+        float depthFade = clampf(1.0f - s.depth * DEPTH_FADE_RATE, 0.2f, 1.0f);
+        float alphaOuter = 1.0f * depthFade;
+        float r, g, b;
+        hsb2rgb(s.hue, s.sat, 100.0f, r, g, b);
+        glColor4f(r, g, b, alphaOuter);
+        glVertex2f(s.ax, s.ay);
+        glVertex2f(s.bx, s.by);
+    }
+    glEnd();
+
+    glLineWidth(1.4f);
+    glBegin(GL_LINES);
+    for (const Segment& s : g_segments) {
+        float depthFade = clampf(1.0f - s.depth * DEPTH_FADE_RATE, 0.2f, 1.0f);
+        float alphaCore = (75.0f / 100.0f) * depthFade;
+        float r, g, b;
+        hsb2rgb(s.hue, std::min(100.0f, s.sat + 12.0f), 100.0f, r, g, b);
+        glColor4f(r, g, b, alphaCore);
+        glVertex2f(s.ax, s.ay);
+        glVertex2f(s.bx, s.by);
+    }
+    glEnd();
+
+    glPointSize(2.0f);
+    glBegin(GL_POINTS);
+    for (const Segment& s : g_segments) {
+        float depthFade = clampf(1.0f - s.depth * DEPTH_FADE_RATE, 0.2f, 1.0f);
+        float r, g, b;
+        hsb2rgb(s.hue, std::min(100.0f, s.sat + 20.0f), 100.0f, r, g, b);
+        glColor4f(r, g, b, 0.7f * depthFade);
+        glVertex2f(s.bx, s.by);
+    }
+    glEnd();
+
+    glDisable(GL_BLEND);
+}
+
+static void drawLeaves() {
+    int n = (int)g_branches.size();
+    if (n == 0) return;
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+
+    struct GlowLayer { float size; float alphaScale; };
+    static const GlowLayer layers[3] = {
+        { 12.0f, 0.14f },
+        { 6.5f,  0.32f },
+        { 3.0f,  0.9f  },
+    };
+
+    for (const GlowLayer& layer : layers) {
+        glBegin(GL_POINTS);
+        for (int i = 0; i < n; ++i) {
+            if (g_hasKid[i]) continue;
+
+            const BranchPoint& p = g_branches[i];
+            float depthFade = clampf(1.0f - p.depth * DEPTH_FADE_RATE, 0.3f, 1.0f);
+            float sizeJitter = hashRange(i * 3 + 1, 0.75f, 1.25f);
+
+            float hue = hashRange(i, HUE_MIN, HUE_MAX);
+            float sat = clampf(hashRange(i * 7 + 3, SAT_BASE - 20.0f, SAT_BASE + 5.0f), 0.0f, 100.0f);
+            float r, g, b;
+            hsb2rgb(hue, sat, 100.0f, r, g, b);
+
+            glColor4f(r, g, b, layer.alphaScale * depthFade);
+            glPointSize(layer.size * sizeJitter);
+            glVertex2f(p.x, p.y);
+        }
+        glEnd();
+    }
+
+    glDisable(GL_BLEND);
+}
+
+static void draw_attractors() {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+
+    float r, g, b;
+    hsb2rgb((HUE_MIN + HUE_MAX) * 0.5f, SAT_BASE * 0.28f, 100.0f, r, g, b);
+    glColor4f(r, g, b, 1.0f);
+    glPointSize(1.6f);
+
+    int n = (int)g_ax.size();
+    int skip = std::max(1, n / 1500);
+
+    glBegin(GL_POINTS);
+    for (int i = 0; i < n; i += skip) {
+        glVertex2f(g_ax[i], g_ay[i]);
+    }
+    glEnd();
+
+    glDisable(GL_BLEND);
+}
+
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
-    std::printf("growth loop working\n");
+
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+        return 1;
+    }
+
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+
+    int winW = 1280, winH = 800;
+    SDL_Window* window = SDL_CreateWindow(
+        "Space Colonization 2D (CUDA + SDL3)",
+        winW, winH,
+        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+    if (!window) {
+        std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
+        return 1;
+    }
+
+    SDL_GLContext glctx = SDL_GL_CreateContext(window);
+    if (!glctx) {
+        std::fprintf(stderr, "SDL_GL_CreateContext failed: %s\n", SDL_GetError());
+        return 1;
+    }
+    SDL_GL_SetSwapInterval(1);
+
+    glEnable(GL_LINE_SMOOTH);
+    glEnable(GL_POINT_SMOOTH);
+    glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
+
+    allocGpu();
+    initSystem();
+
+    bool running = true;
+    bool dragging = false;
+    float panX = 0.0f, panY = 0.0f;
+    float zoom = 1.1f;
+    int lastMouseX = 0, lastMouseY = 0;
+
+    while (running) {
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            switch (ev.type) {
+            case SDL_EVENT_QUIT:
+                running = false;
+                break;
+            case SDL_EVENT_KEY_DOWN:
+                if (ev.key.key == SDLK_ESCAPE) running = false;
+                if (ev.key.key == SDLK_R) initSystem();
+                break;
+            case SDL_EVENT_MOUSE_BUTTON_DOWN:
+                if (ev.button.button == SDL_BUTTON_LEFT) {
+                    dragging = true;
+                    lastMouseX = (int)ev.button.x;
+                    lastMouseY = (int)ev.button.y;
+                }
+                break;
+            case SDL_EVENT_MOUSE_BUTTON_UP:
+                if (ev.button.button == SDL_BUTTON_LEFT) dragging = false;
+                break;
+            case SDL_EVENT_MOUSE_MOTION:
+                if (dragging) {
+                    panX += ev.motion.xrel / zoom;
+                    panY -= ev.motion.yrel / zoom;
+                }
+                break;
+            case SDL_EVENT_MOUSE_WHEEL:
+                zoom *= std::pow(1.1f, ev.wheel.y);
+                zoom = clampf(zoom, 0.15f, 8.0f);
+                break;
+            case SDL_EVENT_WINDOW_RESIZED:
+                winW = ev.window.data1;
+                winH = ev.window.data2;
+                break;
+            default:
+                break;
+            }
+        }
+
+        growOneStep();
+
+        SDL_GetWindowSize(window, &winW, &winH);
+        glViewport(0, 0, winW, winH);
+
+        glClearColor(0.8f, 0.1f, 0.1f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        float aspect = winH > 0 ? (float)winW / (float)winH : 1.0f;
+        float halfH = WORLD_RADIUS * 1.35f;
+        float halfW = halfH * aspect;
+
+        glMatrixMode(GL_PROJECTION);
+        glLoadIdentity();
+        glOrtho(-halfW, halfW, -halfH, halfH, -1.0, 1.0);
+
+        glMatrixMode(GL_MODELVIEW);
+        glLoadIdentity();
+        glScalef(zoom, zoom, 1.0f);
+        glTranslatef(panX, panY, 0.0f);
+
+        drawWorldCircle(WORLD_RADIUS, 128,
+            (HUE_MIN + HUE_MAX) * 0.5f, SAT_BASE * 0.7f, 70.0f, 0.25f);
+        drawSegments();
+        drawLeaves();
+        draw_attractors();
+
+        SDL_GL_SwapWindow(window);
+    }
+
+    freeGpu();
+    SDL_GL_DestroyContext(glctx);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
     return 0;
 }
