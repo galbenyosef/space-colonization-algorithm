@@ -14,6 +14,7 @@
 #include <cmath>
 #include <vector>
 #include <random>
+#include <algorithm>
 
 
 static inline float clampf(float v, float lo, float hi) {
