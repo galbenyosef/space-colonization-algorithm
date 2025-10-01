@@ -22,13 +22,13 @@ static inline float clampf(float v, float lo, float hi) {
 }
 static const float PI_F = 3.14159265358979323846f;
 
-static const int   NUM_ATTRACTORS = 1500;
-static const float STEP = 4.0f;
-static const float KILL_DIST = 4.0f;
-static const float INFLUENCE_DIST = 70.0f;
-static const float WORLD_RADIUS = 300.0f;
-static const int   MAX_BRANCHES = 5000;
-static const int   MAX_SEGMENTS = 5000;
+static const int   NUM_ATTRACTORS = 2400;
+static const float STEP = 5.0f;
+static const float KILL_DIST = 5.0f;
+static const float INFLUENCE_DIST = 80.0f;
+static const float WORLD_RADIUS = 350.0f;
+static const int   MAX_BRANCHES = 7000;
+static const int   MAX_SEGMENTS = 7000;
 static const float DEPTH_FADE_RATE = 0.004f;
 
 #define CUDA_CHECK(call)                                                     \
