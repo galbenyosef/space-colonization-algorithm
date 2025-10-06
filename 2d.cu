@@ -16,20 +16,19 @@
 #include <random>
 #include <algorithm>
 
-
 static inline float clampf(float v, float lo, float hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
 static const float PI_F = 3.14159265358979323846f;
 
-static const int   NUM_ATTRACTORS = 2400;
-static const float STEP = 5.0f;
-static const float KILL_DIST = 5.0f;
-static const float INFLUENCE_DIST = 80.0f;
-static const float WORLD_RADIUS = 350.0f;
-static const int   MAX_BRANCHES = 7000;
-static const int   MAX_SEGMENTS = 7000;
-static const float DEPTH_FADE_RATE = 0.004f;
+static const int   NUM_ATTRACTORS = 3200;
+static const float STEP = 6.0f;
+static const float KILL_DIST = 6.0f;
+static const float INFLUENCE_DIST = 90.0f;
+static const float WORLD_RADIUS = 380.0f;
+static const int   MAX_BRANCHES = 9000;
+static const int   MAX_SEGMENTS = 9000;
+static const float DEPTH_FADE_RATE = 0.0022f;
 
 #define CUDA_CHECK(call)                                                     \
     do {                                                                     \
