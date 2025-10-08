@@ -386,51 +386,166 @@ static void growOneStep() {
 }
 
 
+struct NoiseDot {
+    float u, v;
+    float speed;
+    float phase;
+};
+
+static std::vector<NoiseDot> g_noiseDots;
+
+static void init_noise_dots() {
+    g_noiseDots.resize(2400);
+    for (auto& d : g_noiseDots) {
+        d.u = uniform(0.0f, 1.0f);
+        d.v = uniform(0.0f, 1.0f);
+        d.speed = uniform(2.0f, 9.0f);
+        d.phase = uniform(0.0f, 2.0f * PI_F);
+    }
+}
+
+static void drawBgNoise(int winW, int winH, double t) {
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(0, winW, winH, 0, -1, 1);
+
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+
+    glPointSize(1.2f);
+    glBegin(GL_POINTS);
+    for (const NoiseDot& d : g_noiseDots) {
+        float flick = 0.5f + 0.5f * std::sin((float)t * d.speed + d.phase);
+        float a = 0.04f + flick * 0.06f;
+        glColor4f(0.62f, 0.66f, 0.75f, a);
+        glVertex2f(d.u * (float)winW, d.v * (float)winH);
+    }
+    glEnd();
+
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glPopMatrix();
+}
+
+
+static void drawGroundGrid(float halfX, float halfZ, float y, int divisions) {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glColor4f(0.45f, 0.55f, 0.65f, 0.2f);
+    glLineWidth(1.0f);
+
+    glBegin(GL_LINES);
+    for (int i = 0; i <= divisions; ++i) {
+        float t = -halfX + (2.0f * halfX) * ((float)i / divisions);
+        glVertex3f(t, y, -halfZ);
+        glVertex3f(t, y, halfZ);
+    }
+    for (int i = 0; i <= divisions; ++i) {
+        float t = -halfZ + (2.0f * halfZ) * ((float)i / divisions);
+        glVertex3f(-halfX, y, t);
+        glVertex3f(halfX, y, t);
+    }
+    glEnd();
+
+    glDisable(GL_BLEND);
+}
+
+static void orthoBasis(float dx, float dy, float dz,
+    float& ux, float& uy, float& uz,
+    float& vx, float& vy, float& vz) {
+    float ax = std::fabs(dx), ay = std::fabs(dy), az = std::fabs(dz);
+    float tx, ty, tz;
+    if (ax <= ay && ax <= az) { tx = 1; ty = 0; tz = 0; }
+    else if (ay <= ax && ay <= az) { tx = 0; ty = 1; tz = 0; }
+    else { tx = 0; ty = 0; tz = 1; }
+
+    ux = dy * tz - dz * ty;
+    uy = dz * tx - dx * tz;
+    uz = dx * ty - dy * tx;
+    float um = std::sqrt(ux * ux + uy * uy + uz * uz);
+    if (um < 1e-6f) { ux = 1; uy = 0; uz = 0; um = 1; }
+    ux /= um; uy /= um; uz /= um;
+
+    vx = dy * uz - dz * uy;
+    vy = dz * ux - dx * uz;
+    vz = dx * uy - dy * ux;
+}
+
+static void drawCylinder(float ax_, float ay_, float az_,
+    float bx_, float by_, float bz_,
+    float r0, float r1, int sides,
+    float cr, float cg, float cb) {
+    float dx = bx_ - ax_, dy = by_ - ay_, dz = bz_ - az_;
+    float len = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (len < 1e-6f) return;
+    dx /= len; dy /= len; dz /= len;
+
+    float ux, uy, uz, vx, vy, vz;
+    orthoBasis(dx, dy, dz, ux, uy, uz, vx, vy, vz);
+
+    glColor3f(cr, cg, cb);
+    glBegin(GL_QUAD_STRIP);
+    for (int i = 0; i <= sides; ++i) {
+        float ang = 2.0f * PI_F * (float)i / (float)sides;
+        float ca = std::cos(ang), sa = std::sin(ang);
+        float nx = ux * ca + vx * sa;
+        float ny = uy * ca + vy * sa;
+        float nz = uz * ca + vz * sa;
+
+        glNormal3f(nx, ny, nz);
+        glVertex3f(ax_ + nx * r0, ay_ + ny * r0, az_ + nz * r0);
+        glVertex3f(bx_ + nx * r1, by_ + ny * r1, bz_ + nz * r1);
+    }
+    glEnd();
+}
+
+static float trunkRadius(int depth) {
+    float t = clampf((float)depth / TRUNK_TAPER_DEPTH, 0.0f, 1.0f);
+    float eased = 1.0f - (1.0f - t) * (1.0f - t);
+    return TRUNK_BASE_RADIUS + (TRUNK_MIN_RADIUS - TRUNK_BASE_RADIUS) * eased;
+}
+
+static void drawSegments() {
+    glEnable(GL_LIGHTING);
+    glEnable(GL_LIGHT0);
+    glEnable(GL_COLOR_MATERIAL);
+    glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
+    glShadeModel(GL_SMOOTH);
+
+    GLfloat lightPos[] = { 0.35f, 1.0f, 0.55f, 0.0f };
+    GLfloat lightAmbient[] = { 0.20f, 0.15f, 0.12f, 1.0f };
+    GLfloat lightDiffuse[] = { 1.0f, 0.90f, 0.78f, 1.0f };
+    glLightfv(GL_LIGHT0, GL_POSITION, lightPos);
+    glLightfv(GL_LIGHT0, GL_AMBIENT, lightAmbient);
+    glLightfv(GL_LIGHT0, GL_DIFFUSE, lightDiffuse);
+
+    for (const Segment& s : g_segments) {
+        float r0 = trunkRadius(s.depth);
+        float r1 = trunkRadius(s.depth + 1);
+
+        float r, g, b;
+        hsb2rgb(s.hue, s.sat, s.bri, r, g, b);
+
+        drawCylinder(s.ax, s.ay, s.az, s.bx, s.by, s.bz, r0, r1, CYLINDER_SIDES, r, g, b);
+    }
+
+    glDisable(GL_COLOR_MATERIAL);
+    glDisable(GL_LIGHT0);
+    glDisable(GL_LIGHTING);
+}
+
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
-
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
-        std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
-        return 1;
-    }
-
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-
-    int winW = 1280, winH = 800;
-    SDL_Window* window = SDL_CreateWindow(
-        "Procedural Tree (CUDA + SDL3)",
-        winW, winH,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
-    if (!window) return 1;
-
-    SDL_GLContext glctx = SDL_GL_CreateContext(window);
-    if (!glctx) return 1;
-    SDL_GL_SetSwapInterval(1);
-
-    allocGpu();
-    initSystem();
-
-    bool running = true;
-    while (running) {
-        SDL_Event ev;
-        while (SDL_PollEvent(&ev)) {
-            if (ev.type == SDL_EVENT_QUIT) running = false;
-            if (ev.type == SDL_EVENT_KEY_DOWN && ev.key.key == SDLK_ESCAPE) running = false;
-        }
-        growOneStep();
-        glViewport(0, 0, winW, winH);
-        glClearColor(0.03f, 0.03f, 0.04f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        SDL_GL_SwapWindow(window);
-    }
-
-    freeGpu();
-    SDL_GL_DestroyContext(glctx);
-    SDL_DestroyWindow(window);
-    SDL_Quit();
+    std::printf("tree cylinder rendering done\n");
     return 0;
 }
