@@ -544,8 +544,269 @@ static void drawSegments() {
     glDisable(GL_LIGHTING);
 }
 
+static void drawBuds() {
+    int n = (int)g_branches.size();
+    if (n <= TRUNK_STEPS + 1) return;
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    glPointSize(2.2f);
+
+    glBegin(GL_POINTS);
+    for (int i = TRUNK_STEPS + 1; i < n; ++i) {
+        if (!g_hasKid[i]) continue;
+
+        const BranchPoint& p = g_branches[i];
+        float depthFade = clampf(1.0f - p.depth * 0.00035f, 0.3f, 1.0f);
+        float hue = hashRange(i, BARK_HUE_MIN - 4.0f, BARK_HUE_MAX + 8.0f);
+        float sat = hashRange(i * 5 + 2, 40.0f, 65.0f);
+        float r, g, b;
+        hsb2rgb(hue, sat, 70.0f, r, g, b);
+        glColor4f(r, g, b, 0.25f * depthFade);
+        glVertex3f(p.x, p.y, p.z);
+    }
+    glEnd();
+
+    glDisable(GL_BLEND);
+}
+
+static void leafOffset(int seed, float& ox, float& oy, float& oz) {
+    float dx = hashRange(seed + 1, -1.0f, 1.0f);
+    float dy = hashRange(seed + 2, -1.0f, 1.0f);
+    float dz = hashRange(seed + 3, -1.0f, 1.0f);
+    float len = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (len < 1e-4f) { dx = 1.0f; dy = 0.0f; dz = 0.0f; len = 1.0f; }
+    dx /= len; dy /= len; dz /= len;
+
+    float dist = hashRange(seed + 4, BUSH_RADIUS_MIN, BUSH_RADIUS_MAX);
+    ox = dx * dist; oy = dy * dist; oz = dz * dist;
+}
+
+static void drawLeaves() {
+    int n = (int)g_branches.size();
+    if (n <= TRUNK_STEPS + 1) return;
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+
+    glBegin(GL_POINTS);
+    for (int i = TRUNK_STEPS + 1; i < n; ++i) {
+        if (g_hasKid[i]) continue;
+
+        const BranchPoint& p = g_branches[i];
+        float depthFade = clampf(1.0f - p.depth * 0.00035f, 0.55f, 1.0f);
+
+        for (int k = 0; k < LEAVES_PER_TIP; ++k) {
+            int seed = i * 97 + k * 13;
+
+            float ox, oy, oz;
+            leafOffset(seed, ox, oy, oz);
+
+            float hue = hashRange(seed + 5, LEAF_HUE_MIN, LEAF_HUE_MAX);
+            float sat = hashRange(seed + 6, LEAF_SAT_MIN, LEAF_SAT_MAX);
+            float bri = hashRange(seed + 7, LEAF_BRI_MIN, LEAF_BRI_MAX);
+
+            float r, g, b;
+            hsb2rgb(hue, sat, bri, r, g, b);
+
+            float sizeJitter = hashRange(seed + 8, 0.8f, 1.5f);
+            glPointSize(7.0f * sizeJitter);
+            glColor4f(r, g, b, 0.92f * depthFade);
+            glVertex3f(p.x + ox, p.y + oy, p.z + oz);
+        }
+    }
+    glEnd();
+
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+
+    struct GlowLayer { float size; float alphaScale; float briBoost; };
+    static const GlowLayer layers[2] = {
+        { 18.0f, 0.16f, 0.0f  },
+        { 9.0f,  0.35f, 10.0f },
+    };
+
+    for (const GlowLayer& layer : layers) {
+        glBegin(GL_POINTS);
+        for (int i = TRUNK_STEPS + 1; i < n; ++i) {
+            if (g_hasKid[i]) continue;
+
+            const BranchPoint& p = g_branches[i];
+            float depthFade = clampf(1.0f - p.depth * 0.00035f, 0.55f, 1.0f);
+
+            for (int k = 0; k < LEAVES_PER_TIP; ++k) {
+                int seed = i * 97 + k * 13;
+
+                float ox, oy, oz;
+                leafOffset(seed, ox, oy, oz);
+
+                float hue = hashRange(seed + 5, LEAF_HUE_MIN, LEAF_HUE_MAX);
+                float sat = hashRange(seed + 6, LEAF_SAT_MIN, LEAF_SAT_MAX);
+                float bri = clampf(hashRange(seed + 7, LEAF_BRI_MIN, LEAF_BRI_MAX) + layer.briBoost, 0.0f, 100.0f);
+
+                float r, g, b;
+                hsb2rgb(hue, sat, bri, r, g, b);
+
+                float sizeJitter = hashRange(seed + 8, 0.8f, 1.5f);
+                glColor4f(r, g, b, layer.alphaScale * depthFade);
+                glPointSize(layer.size * sizeJitter);
+                glVertex3f(p.x + ox, p.y + oy, p.z + oz);
+            }
+        }
+        glEnd();
+    }
+
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+}
+
+
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
-    std::printf("tree cylinder rendering done\n");
+
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+        return 1;
+    }
+
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+
+    int winW = 1280, winH = 800;
+    SDL_Window* window = SDL_CreateWindow(
+        "Procedural Cherry Tree (CUDA + SDL3)",
+        winW, winH,
+        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+    if (!window) {
+        std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
+        return 1;
+    }
+
+    SDL_GLContext glctx = SDL_GL_CreateContext(window);
+    if (!glctx) {
+        std::fprintf(stderr, "SDL_GL_CreateContext failed: %s\n", SDL_GetError());
+        return 1;
+    }
+    SDL_GL_SetSwapInterval(1);
+
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_LINE_SMOOTH);
+    glEnable(GL_POINT_SMOOTH);
+    glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
+    glEnable(GL_NORMALIZE);
+
+    allocGpu();
+    initSystem();
+    init_noise_dots();
+
+    bool running = true;
+    bool dragging = false;
+    bool draggingPan = false;
+    float yaw = 0.0f, basePitch = 15.0f;
+    float camDist = 1000.0f;
+    float panX = 0.0f, panY = 0.0f;
+    Uint64 lastTicks = SDL_GetTicks();
+    double timeSeconds = 0.0;
+
+    while (running) {
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            switch (ev.type) {
+            case SDL_EVENT_QUIT:
+                running = false;
+                break;
+            case SDL_EVENT_KEY_DOWN:
+                if (ev.key.key == SDLK_ESCAPE) running = false;
+                if (ev.key.key == SDLK_R) {
+                    initSystem();
+                    yaw = 0.0f; basePitch = 15.0f;
+                    camDist = 1000.0f;
+                    panX = 0.0f; panY = 0.0f;
+                }
+                break;
+            case SDL_EVENT_MOUSE_BUTTON_DOWN:
+                if (ev.button.button == SDL_BUTTON_LEFT) dragging = true;
+                if (ev.button.button == SDL_BUTTON_RIGHT) draggingPan = true;
+                break;
+            case SDL_EVENT_MOUSE_BUTTON_UP:
+                if (ev.button.button == SDL_BUTTON_LEFT) dragging = false;
+                if (ev.button.button == SDL_BUTTON_RIGHT) draggingPan = false;
+                break;
+            case SDL_EVENT_MOUSE_MOTION:
+                if (dragging) {
+                    yaw += ev.motion.xrel * 0.25f;
+                    basePitch += ev.motion.yrel * 0.25f;
+                    basePitch = clampf(basePitch, -89.0f, 89.0f);
+                }
+                if (draggingPan) {
+                    float panScale = camDist * 0.0016f;
+                    panX += ev.motion.xrel * panScale;
+                    panY -= ev.motion.yrel * panScale;
+                }
+                break;
+            case SDL_EVENT_MOUSE_WHEEL:
+                camDist -= ev.wheel.y * 30.0f;
+                camDist = clampf(camDist, 250.0f, 4000.0f);
+                break;
+            case SDL_EVENT_WINDOW_RESIZED:
+                winW = ev.window.data1;
+                winH = ev.window.data2;
+                break;
+            default:
+                break;
+            }
+        }
+
+        Uint64 now = SDL_GetTicks();
+        double dt = (now - lastTicks) / 1000.0;
+        lastTicks = now;
+        timeSeconds += dt;
+
+        if (!dragging) {
+            yaw += (float)(dt * 4.13);
+        }
+        float pitch = basePitch + std::sin(timeSeconds * 0.054) * 3.44f;
+
+        growOneStep();
+
+        SDL_GetWindowSize(window, &winW, &winH);
+        glViewport(0, 0, winW, winH);
+
+        glClearColor(0.03f, 0.03f, 0.04f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        drawBgNoise(winW, winH, timeSeconds);
+
+        float aspect = winH > 0 ? (float)winW / (float)winH : 1.0f;
+        float nearP = 1.0f, farP = 6000.0f;
+        float fovRad = 45.0f * PI_F / 180.0f;
+        float top = nearP * std::tan(fovRad * 0.5f);
+        float right = top * aspect;
+
+        glMatrixMode(GL_PROJECTION);
+        glLoadIdentity();
+        glFrustum(-right, right, -top, top, nearP, farP);
+
+        glMatrixMode(GL_MODELVIEW);
+        glLoadIdentity();
+        glTranslatef(panX, panY, -camDist);
+        glRotatef(pitch, 1.0f, 0.0f, 0.0f);
+        glRotatef(yaw, 0.0f, 1.0f, 0.0f);
+
+        drawGroundGrid(WORLD_HALF_X, WORLD_HALF_Z, GROUND_Y, 24);
+        drawSegments();
+        drawBuds();
+        drawLeaves();
+
+        SDL_GL_SwapWindow(window);
+    }
+
+    freeGpu();
+    SDL_GL_DestroyContext(glctx);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
     return 0;
 }
